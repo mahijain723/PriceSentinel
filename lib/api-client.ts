@@ -52,7 +52,11 @@ export async function pollNow(url: string): Promise<Response> {
 export async function getChangeCounts(): Promise<Record<string, number>> {
   const config = await getConfig();
   if (!config.apiUrl) return {};
-  const res = await fetch(`${config.apiUrl}/changes/unread-count`);
-  if (!res.ok) return {};
-  return res.json();
+  try {
+    const res = await fetch(`${config.apiUrl}/changes/unread-count`);
+    if (!res.ok) return {};
+    return res.json();
+  } catch {
+    return {};
+  }
 }
