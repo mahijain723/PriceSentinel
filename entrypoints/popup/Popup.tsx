@@ -13,7 +13,7 @@ interface PageStatus {
   lastChecked: string;
 }
 
-/* ── Utility ──────────────────────────────────────────── */
+/* ── Utilities ───────────────────────────────────────── */
 
 function timeAgo(ts: string): string {
   const diff = Date.now() - new Date(ts).getTime();
@@ -29,7 +29,7 @@ function plural(n: number, w: string): string {
   return n === 1 ? w : `${w}s`;
 }
 
-/* ── Spinner component ─────────────────────────────────── */
+/* ── Spinner component ────────────────────────────────── */
 
 function Spinner({ label = 'Loading' }: { label?: string }) {
   return (
@@ -37,7 +37,7 @@ function Spinner({ label = 'Loading' }: { label?: string }) {
   );
 }
 
-/* ── Main popup component ─────────────────────────────── */
+/* ── Main popup component ────────────────────────────── */
 
 export function Popup() {
   const [pages, setPages] = useState<WatchedPage[]>([]);
@@ -53,7 +53,6 @@ export function Popup() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [currentWatched, setCurrentWatched] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
-  const [addingPage, setAddingPage] = useState(false);
 
   const [expandedPage, setExpandedPage] = useState<string | null>(null);
   const [pageChanges, setPageChanges] = useState<Record<string, ChangeEntry[]>>({});
@@ -61,29 +60,33 @@ export function Popup() {
   const [pollingPages, setPollingPages] = useState<Set<string>>(new Set());
 
   const refreshCounter = useRef(0);
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  /* ── Data fetching ──────────────────────────────────── */
+  /* ── Data fetching (debounced) ──────────────────────── */
 
   const refreshData = useCallback(() => {
-    const tag = ++refreshCounter.current;
-    setLoadError(null);
+    // Debounce: if called again within 300ms, reset the timer
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    debounceTimer.current = setTimeout(() => {
+      const tag = ++refreshCounter.current;
+      setLoadError(null);
 
-    chrome.runtime.sendMessage({ type: 'GET_PAGES' }, (res) => {
-      // Guard against stale responses after rapid refresh
-      if (tag !== refreshCounter.current) return;
-      if (chrome.runtime.lastError) {
-        setLoadError(chrome.runtime.lastError.message ?? 'Failed to load pages');
+      chrome.runtime.sendMessage({ type: 'GET_PAGES' }, (res) => {
+        if (tag !== refreshCounter.current) return;
+        if (chrome.runtime.lastError) {
+          setLoadError(chrome.runtime.lastError.message ?? 'Failed to load pages');
+          setLoading(false);
+          return;
+        }
+        setPages(res?.pages ?? []);
         setLoading(false);
-        return;
-      }
-      setPages(res?.pages ?? []);
-      setLoading(false);
-    });
+      });
 
-    chrome.runtime.sendMessage({ type: 'GET_CHANGE_COUNTS' }, (res) => {
-      if (tag !== refreshCounter.current) return;
-      if (res?.statuses) setPageStatuses(res.statuses);
-    });
+      chrome.runtime.sendMessage({ type: 'GET_CHANGE_COUNTS' }, (res) => {
+        if (tag !== refreshCounter.current) return;
+        if (res?.statuses) setPageStatuses(res.statuses);
+      });
+    }, 300);
   }, []);
 
   useEffect(() => {
@@ -96,7 +99,7 @@ export function Popup() {
       }
     });
 
-    /* Check backend connectivity */
+    /* Check backend connectivity (cached in background) */
     chrome.runtime.sendMessage({ type: 'GET_BACKEND_STATUS' }, (res) => {
       if (res?.configured && res?.apiUrl) {
         setBackendStatus('connected');
@@ -117,38 +120,42 @@ export function Popup() {
     else setSelector('');
   }, [pages, currentTabUrl]);
 
-  /* ── Handlers ───────────────────────────────────────── */
+  /* ── Handlers (optimistic) ──────────────────────────── */
 
   const handleWatchPage = () => {
+    // Optimistic: add page immediately, sync background
+    const newPage: WatchedPage = { url: currentTabUrl, title: currentTabTitle, selector: selector || undefined, addedAt: Date.now() };
+    setPages((prev) => {
+      if (prev.some((p) => p.url === currentTabUrl)) return prev; // already present
+      return [newPage, ...prev];
+    });
+    setCurrentWatched(true);
     setAddError(null);
-    setAddingPage(true);
+    setShowAdvanced(false);
+
+    // Actual background sync
     chrome.runtime.sendMessage(
-      {
-        type: 'ADD_PAGE',
-        url: currentTabUrl,
-        title: currentTabTitle,
-        selector: selector || undefined,
-      },
+      { type: 'ADD_PAGE', url: currentTabUrl, title: currentTabTitle, selector: selector || undefined },
       (res) => {
-        setAddingPage(false);
-        if (res?.ok) {
-          setShowAdvanced(false);
-          refreshData();
-        } else {
-          setAddError(res?.error ?? 'Failed to add page');
+        if (res && !res.ok) {
+          // Rollback on failure
+          setPages((prev) => prev.filter((p) => p.url !== currentTabUrl));
+          setCurrentWatched(false);
+          setAddError(res.error ?? 'Failed to add page');
         }
       },
     );
   };
 
   const handleUnwatchPage = () => {
-    chrome.runtime.sendMessage({ type: 'REMOVE_PAGE', url: currentTabUrl }, () => {
-      setPages((prev) => prev.filter((p) => p.url !== currentTabUrl));
-      setCurrentWatched(false);
-      setSelector('');
-      setAddError(null);
-      setShowAdvanced(false);
-    });
+    // Optimistic: remove immediately
+    setPages((prev) => prev.filter((p) => p.url !== currentTabUrl));
+    setCurrentWatched(false);
+    setSelector('');
+    setAddError(null);
+    setShowAdvanced(false);
+
+    chrome.runtime.sendMessage({ type: 'REMOVE_PAGE', url: currentTabUrl });
   };
 
   const handlePickFromPage = () => {
@@ -162,11 +169,13 @@ export function Popup() {
   };
 
   const handleRemove = (url: string) => {
-    chrome.runtime.sendMessage({ type: 'REMOVE_PAGE', url }, () => refreshData());
+    // Optimistic: remove immediately
+    setPages((prev) => prev.filter((p) => p.url !== url));
     if (expandedPage === url) {
       setExpandedPage(null);
       setPageChanges((prev) => { const n = { ...prev }; delete n[url]; return n; });
     }
+    chrome.runtime.sendMessage({ type: 'REMOVE_PAGE', url });
   };
 
   const handleCheckNow = (url: string) => {
@@ -248,7 +257,7 @@ export function Popup() {
 
   return (
     <div class="popup">
-      {/* ── Header ───────────────────────────────────── */}
+      {/* ── Header ─────────────────────────────────────── */}
       <header>
         <div class="header-left">
           <h1>PriceSentinel</h1>
@@ -265,7 +274,7 @@ export function Popup() {
         </div>
       </header>
 
-      {/* ── Backend status ───────────────────────────── */}
+      {/* ── Backend status ─────────────────────────────── */}
       <div class="backend-status" role="status" aria-live="polite">
         <span class={`backend-dot ${backendStatus}`} />
         {backendStatus === 'checking' && 'Checking backend…'}
@@ -273,7 +282,7 @@ export function Popup() {
         {backendStatus === 'disconnected' && 'Backend not configured — open Settings'}
       </div>
 
-      {/* ── Current page section ─────────────────────── */}
+      {/* ── Current page section ───────────────────────── */}
       {currentTabUrl && (
         <section class="current-page" aria-label="Current page">
           <div class="current-page-header">
@@ -301,9 +310,7 @@ export function Popup() {
                 <button
                   class="btn btn-primary btn-sm"
                   onClick={handleWatchPage}
-                  disabled={addingPage}
                 >
-                  {addingPage && <Spinner />}
                   + Watch this page
                 </button>
                 <button
@@ -342,7 +349,7 @@ export function Popup() {
         </section>
       )}
 
-      {/* ── Watched pages list ────────────────────────── */}
+      {/* ── Watched pages list ──────────────────────────── */}
       {pages.length === 0 ? (
         <div class="state-message">
           <div class="state-icon">👀</div>
@@ -412,7 +419,6 @@ export function Popup() {
                   </div>
                 </div>
 
-                {/* Expanded change history */}
                 {isExpanded && (
                   <div class="change-list" role="region" aria-label={`Changes for ${page.title || page.url}`}>
                     {isLoadingChanges && (
@@ -431,20 +437,12 @@ export function Popup() {
                           <span class="change-summary">{c.summary}</span>
                           <span class="change-time">{timeAgo(c.created_at)}</span>
                         </div>
-                        {c.diff
-                          .filter((d) => d.type !== 'unchanged')
-                          .slice(0, 5)
-                          .map((seg, i) => (
-                            // biome-ignore lint/suspicious/noArrayIndexKey: stable order, small list
-                            <div key={i} class={`diff-segment diff-${seg.type}`}>
-                              {seg.text.slice(0, 120)}
-                            </div>
-                          ))}
-                        {c.diff.filter((d) => d.type !== 'unchanged').length > 5 && (
-                          <div class="more-diff">
-                            … and {c.diff.filter((d) => d.type !== 'unchanged').length - 5} more
+                        {c.diff.map((seg, i) => (
+                          // biome-ignore lint/suspicious/noArrayIndexKey: stable order, small list
+                          <div key={i} class={`diff-segment diff-${seg.type}`}>
+                            {seg.text}
                           </div>
-                        )}
+                        ))}
                       </div>
                     ))}
                   </div>
@@ -455,7 +453,7 @@ export function Popup() {
         </ul>
       )}
 
-      {/* ── Footer ────────────────────────────────────── */}
+      {/* ── Footer ──────────────────────────────────────── */}
       <footer>
         <a href="#" class="footer-link" onClick={(e) => { e.preventDefault(); chrome.runtime.openOptionsPage(); }}>
           Settings

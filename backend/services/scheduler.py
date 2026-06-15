@@ -2,7 +2,6 @@
 APScheduler-based poll scheduler.
 Runs in-process with the FastAPI app. No Redis needed for MVP.
 """
-
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 scheduler = AsyncIOScheduler()
@@ -46,3 +45,23 @@ async def run_poll_once(page_id: int):
     """Run a single poll cycle immediately."""
     from services.poll import poll_page
     await poll_page(page_id)
+
+
+def restore_polls():
+    """Reschedule polls for every watched page in the database.
+
+    Called on backend startup so polling resumes automatically after restart.
+    Without this, no polls run until the extension sends a registerPage call.
+    """
+    from models import SessionLocal, WatchedPage
+    db = SessionLocal()
+    try:
+        pages = db.query(WatchedPage).all()
+        for p in pages:
+            schedule_poll(p.id, hours=p.poll_interval_hours or 24)
+        if pages:
+            print(f"[scheduler] Restored polls for {len(pages)} watched page(s)")
+    except Exception as e:
+        print(f"[scheduler] Failed to restore polls: {e}")
+    finally:
+        db.close()

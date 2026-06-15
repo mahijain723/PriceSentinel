@@ -3,18 +3,19 @@ PriceSentinel — Backend API
 
 FastAPI server that polls watched pages, diffs them, and dispatches notifications.
 """
-
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import pages, changes, alerts
-from services.scheduler import start_scheduler, stop_scheduler
+from services.scheduler import start_scheduler, stop_scheduler, restore_polls
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_scheduler()
+    # Resume polling for all watched pages after restart
+    restore_polls()
     yield
     stop_scheduler()
 

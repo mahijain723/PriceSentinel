@@ -1,12 +1,11 @@
-"""
-Poll worker — the complete poll cycle for one page:
+"""Poll worker — the complete poll cycle for one page:
 fetch → diff → store → notify
 """
-
 from models import WatchedPage, PageSnapshot, DiffResult, AlertConfig, SessionLocal
 from services.fetcher import fetch_page
 from services.differ import diff_text, has_meaningful_change
 from services.notifier import notify_all
+from routers.changes import invalidate_unread_cache
 
 
 async def poll_page(page_id: int):
@@ -48,6 +47,9 @@ async def poll_page(page_id: int):
                 )
                 db.add(diff_rec)
                 db.commit()
+
+                # Invalidate the unread-count cache so the next popup sees fresh data
+                invalidate_unread_cache()
 
                 # Send notifications
                 alerts = db.query(AlertConfig).filter(
